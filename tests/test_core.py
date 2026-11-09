@@ -126,3 +126,12 @@ def test_dd_pause(monkeypatch):
     ev = eng.daily()
     assert st.get("paper_paused") is True and not st.positions("paper")
     assert any(e[0] == "skip" and e[2]["reason"] == "paused" for e in ev)
+
+
+def test_no_trading_on_railway_without_postgres(monkeypatch):
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("DATABASE_URL", "")
+    s = Settings()
+    assert not s.persistent_db and not s.trading_allowed
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:5432/db")
+    assert Settings().trading_allowed

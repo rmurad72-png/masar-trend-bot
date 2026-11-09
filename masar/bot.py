@@ -62,7 +62,14 @@ class MasarBot:
     async def job_startup(self, ctx):
         log.info("startup job running")
         accts = "، ".join(M.ACCT[a] for a in self.engine.brokers) or "لا يوجد"
-        await self.send(f"🚀 بوت مسار يعمل\nالحسابات: {accts}")
+        db = "PostgreSQL ✅" if self.s.persistent_db else "ملف مؤقت ⚠️"
+        await self.send(f"🚀 بوت مسار يعمل\nالحسابات: {accts}\nالتخزين: {db}")
+        if not self.s.trading_allowed:
+            await self.send("🚨 لا توجد قاعدة بيانات دائمة (DATABASE_URL فارغ أو غير مربوط).\n"
+                            "أوقفت التداول حتى لا تُفتح الصفقات من جديد بعد كل نشر.\n"
+                            "الحل في Railway: أضف خدمة PostgreSQL، ثم في متغيرات البوت ضع\n"
+                            "DATABASE_URL = ${{Postgres.DATABASE_URL}}")
+            return
         try:
             await self._send_events(await self._run(self.engine.hourly))
             if self.engine.store.get("daily_done") != int(time.time() // 86400):
@@ -74,6 +81,9 @@ class MasarBot:
             await self.send(f"🚨 خطأ عند التشغيل: {type(e).__name__}: {e}")
 
     async def job_daily(self, ctx):
+        if not self.s.trading_allowed:
+            await self.send("🚨 التداول متوقف: لا توجد قاعدة بيانات دائمة. راجع DATABASE_URL في Railway.")
+            return
         for attempt in range(15):                         # wait up to ~30 min for the daily candle
             try:
                 ready = await self._run(self.engine.data_ready)
@@ -104,6 +114,8 @@ class MasarBot:
             await self.send(M.report_text(self.engine, since, "📅 التقرير الأسبوعي (آخر 7 أيام)"))
 
     async def job_hourly(self, ctx):
+        if not self.s.trading_allowed:
+            return
         try:
             await self._send_events(await self._run(self.engine.hourly))
         except Exception as e:

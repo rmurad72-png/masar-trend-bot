@@ -43,7 +43,7 @@ def _b(name, default=False):
 class Settings:
     telegram_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: int = field(default_factory=lambda: int(os.getenv("TELEGRAM_CHAT_ID", "0") or 0))
-    database_url: str = field(default_factory=lambda: os.getenv("DATABASE_URL", "sqlite:///masar.db"))
+    database_url: str = field(default_factory=lambda: (os.getenv("DATABASE_URL") or "sqlite:///masar.db").strip())
     okx_key: str = field(default_factory=lambda: os.getenv("OKX_API_KEY", ""))
     okx_secret: str = field(default_factory=lambda: os.getenv("OKX_API_SECRET", ""))
     okx_passphrase: str = field(default_factory=lambda: os.getenv("OKX_API_PASSPHRASE", ""))
@@ -52,6 +52,20 @@ class Settings:
     paper_shorts: bool = field(default_factory=lambda: _b("PAPER_SHORTS", True))
     live_enabled: bool = field(default_factory=lambda: _b("LIVE_ENABLED", False))
     live_shorts: bool = field(default_factory=lambda: _b("LIVE_SHORTS", False))
+
+    @property
+    def on_railway(self):
+        return any(os.getenv(k) for k in ("RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME", "RAILWAY_PROJECT_ID"))
+
+    @property
+    def persistent_db(self):
+        return self.database_url.startswith("postgres")
+
+    @property
+    def trading_allowed(self):
+        """On Railway the container disk is wiped on every deploy: without Postgres the bot would forget
+        its positions and reopen trades after each deploy. So no trading there without a real database."""
+        return self.persistent_db or not self.on_railway
 
     def accounts(self):
         out = []
