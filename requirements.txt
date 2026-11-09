@@ -1,0 +1,5 @@
+ccxt==4.4.40
+python-telegram-bot[job-queue]==21.6
+psycopg[binary]==3.2.3
+pandas==2.2.3
+numpy==2.1.3
