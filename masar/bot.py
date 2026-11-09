@@ -31,6 +31,22 @@ class MasarBot:
         jq.run_once(self.job_startup, when=5)
 
     @staticmethod
+    def _db_hint():
+        """What DATABASE_URL looks like, without the password."""
+        import os
+        raw = os.getenv("DATABASE_URL")
+        if raw is None:
+            return "المتغير DATABASE_URL غير موجود في خدمة البوت"
+        if not raw.strip():
+            return "المتغير موجود لكنه فارغ (المرجع لم يُحل: تحقق من اسم خدمة Postgres)"
+        v = raw.strip()
+        if "://" in v:
+            scheme, rest = v.split("://", 1)
+            host = rest.split("@")[-1].split("/")[0]
+            return f"{scheme}://***@{host}"
+        return f"قيمة غير صحيحة تبدأ بـ: {v[:12]}"
+
+    @staticmethod
     def _next_hour_offset():
         now = time.time()
         return (3600 - now % 3600) + 300          # HH:05 UTC, after the 1H candle closes
@@ -68,7 +84,8 @@ class MasarBot:
             await self.send("🚨 لا توجد قاعدة بيانات دائمة (DATABASE_URL فارغ أو غير مربوط).\n"
                             "أوقفت التداول حتى لا تُفتح الصفقات من جديد بعد كل نشر.\n"
                             "الحل في Railway: أضف خدمة PostgreSQL، ثم في متغيرات البوت ضع\n"
-                            "DATABASE_URL = ${{Postgres.DATABASE_URL}}")
+                            "DATABASE_URL = ${{Postgres.DATABASE_URL}}\n"
+                            f"ما يراه البوت الآن: {self._db_hint()}")
             return
         try:
             await self._send_events(await self._run(self.engine.hourly))
@@ -82,7 +99,8 @@ class MasarBot:
 
     async def job_daily(self, ctx):
         if not self.s.trading_allowed:
-            await self.send("🚨 التداول متوقف: لا توجد قاعدة بيانات دائمة. راجع DATABASE_URL في Railway.")
+            await self.send("🚨 التداول متوقف: لا توجد قاعدة بيانات دائمة. راجع DATABASE_URL في Railway.\n"
+                            f"ما يراه البوت الآن: {self._db_hint()}")
             return
         for attempt in range(15):                         # wait up to ~30 min for the daily candle
             try:
