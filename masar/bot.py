@@ -45,7 +45,10 @@ class MasarBot:
 
     async def send(self, text):
         for i in range(0, len(text), 3800):
-            await self.app.bot.send_message(self.s.telegram_chat_id, text[i:i + 3800])
+            try:
+                await self.app.bot.send_message(self.s.telegram_chat_id, text[i:i + 3800])
+            except Exception:
+                log.exception("telegram send failed")
 
     async def _send_events(self, events):
         for ev in events:
@@ -57,6 +60,7 @@ class MasarBot:
 
     # ---------- jobs ----------
     async def job_startup(self, ctx):
+        log.info("startup job running")
         accts = "، ".join(M.ACCT[a] for a in self.engine.brokers) or "لا يوجد"
         await self.send(f"🚀 بوت مسار يعمل\nالحسابات: {accts}")
         try:
@@ -67,7 +71,7 @@ class MasarBot:
                 await self._run(self.engine.load_features)
         except Exception as e:
             log.exception("startup")
-            await self.send(f"🚨 خطأ عند التشغيل: {e}")
+            await self.send(f"🚨 خطأ عند التشغيل: {type(e).__name__}: {e}")
 
     async def job_daily(self, ctx):
         for attempt in range(15):                         # wait up to ~30 min for the daily candle
@@ -76,6 +80,8 @@ class MasarBot:
             except Exception as e:
                 ready = False
                 log.warning("data_ready: %s", e)
+                if attempt == 0:
+                    await self.send(f"⚠️ تعذّر جلب الشموع اليومية من OKX: {type(e).__name__}: {e}\nسأعيد المحاولة كل دقيقتين.")
             if ready:
                 break
             await asyncio.sleep(120)
