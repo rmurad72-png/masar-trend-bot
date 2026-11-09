@@ -43,6 +43,12 @@ class Store:
         for s in SCHEMA:
             self._exec(s.replace("{serial}", serial))
 
+    def try_single_instance_lock(self):
+        """Postgres session advisory lock: only one bot process may trade. SQLite: always True."""
+        if not self.pg:
+            return True
+        return bool(self._exec("SELECT pg_try_advisory_lock(727274)").fetchone()[0])
+
     def _q(self, sql):
         return sql.replace("?", "%s") if self.pg else sql
 
