@@ -29,10 +29,12 @@
 ## التشغيل من الجوال
 
 1. **تيليجرام:** أنشئ بوتاً عبر @BotFather وخذ التوكن، واعرف رقم محادثتك عبر @userinfobot.
-2. **Supabase:** مشروع جديد → Connect → Transaction pooler → انسخ رابط الاتصال (يبدأ بـ `postgresql://`).
-3. **Railway:** New Project → Deploy from GitHub → هذا المستودع → Variables، وأضف:
-   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DATABASE_URL`. انظر `.env.example`.
-4. سيصلك «🚀 بوت مسار يعمل»، ثم يعمل البوت يومياً 03:00 بتوقيت الرياض.
+2. **Railway:** New Project → Deploy from GitHub → هذا المستودع.
+3. **قاعدة البيانات (PostgreSQL داخل Railway):** في نفس المشروع: New → Database → PostgreSQL.
+4. في خدمة البوت → Variables، أضف:
+   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, و`DATABASE_URL` بالقيمة `${{Postgres.DATABASE_URL}}` (يربطها Railway تلقائياً).
+   بديل: أي PostgreSQL آخر (مثل Supabase) بوضع رابط الاتصال في `DATABASE_URL`.
+5. سيصلك «🚀 بوت مسار يعمل»، ثم يعمل البوت يومياً 03:00 بتوقيت الرياض.
 
 ### لاحقاً: الحساب الحقيقي
 
@@ -81,7 +83,7 @@ masar/risk.py         حجم الصفقة والسقف والتراجع
 masar/engine.py       الدورة اليومية والفحص الساعي
 masar/market.py       بيانات OKX العامة (شموع 1Dutc)
 masar/brokers/        paper.py (افتراضي) و okx_live.py (حقيقي)
-masar/store.py        Postgres (Supabase) أو SQLite محلياً
+masar/store.py        PostgreSQL (Railway أو أي مزود) أو SQLite محلياً
 masar/bot.py          تيليجرام والجدولة
 masar/messages.py     نصوص الرسائل
 ```
