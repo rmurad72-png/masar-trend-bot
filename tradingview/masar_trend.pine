@@ -88,11 +88,12 @@ plot(pos != 0 ? stopPx : na, "الوقف", color = color.new(color.red, 0), styl
 bgcolor(useBtc and btcReg == 1 ? color.new(color.green, 93) : useBtc and btcReg == -1 ? color.new(color.red, 93) : na, title = "اتجاه BTC")
 
 // ---------- لوحة المعلومات (ملصق؛ الجداول لا تظهر على الجوال) ----------
+// مستويات الغد: تُحسب على كل شمعة (دوال ta يجب ألا تكون داخل شرط وإلا تُحسب خطأ)
+nextHigh = ta.highest(high, entryN)
+nextLow  = ta.lowest(low, entryN)
 var label info = na
 if showInfo and (barstate.islastconfirmedhistory or barstate.isrealtime)
     label.delete(info)
-    nextHigh = ta.highest(high, entryN)
-    nextLow  = ta.lowest(low, entryN)
     regTxt = reg == 1 ? "صاعد" : reg == -1 ? "هابط" : "محايد"
     btcTxt = btcReg == 1 ? "صاعد ✅" : btcReg == -1 ? "هابط" : "محايد"
     posTxt = pos > 0 ? "شراء مفتوح" : pos < 0 ? "بيع مفتوح" : "لا مركز"
@@ -101,8 +102,8 @@ if showInfo and (barstate.islastconfirmedhistory or barstate.isrealtime)
     txt = "مسار " + base + "\n" +
          "الاتجاه: " + regTxt + " | BTC: " + btcTxt + "\n" +
          "المركز: " + posTxt + "\n" +
-         "للاختراق صعوداً: " + str.tostring((nextHigh / close - 1) * 100, "#.0") + "%\n" +
-         "للكسر هبوطاً: " + str.tostring((1 - nextLow / close) * 100, "#.0") + "%\n" +
+         "للاختراق صعوداً: " + str.tostring((nextHigh / close - 1) * 100, "0.0") + "%\n" +
+         "للكسر هبوطاً: " + str.tostring((1 - nextLow / close) * 100, "0.0") + "%\n" +
          "الصفقات: " + str.tostring(n) + " | الرابحة: " + (n > 0 ? str.tostring(wins / n * 100, "#") + "%" : "-") + "\n" +
          "صافي الربح: " + str.tostring(strategy.netprofit, "#,###") + "$"
     info := label.new(bar_index + 2, high, txt, style = label.style_label_left, color = color.new(color.black, 15),
