@@ -1,0 +1,109 @@
+//@version=6
+// مسار — متابعة الاتجاه 55/10 مع فلتر BTC
+// نفس قواعد البوت: اختراق 55 يوماً، خروج على قناة 10 أيام، وقف 2×ATR(20)، فلتر اتجاه BTC (55/20).
+// الإطار: يومي (D) فقط. الرمز: OKX:<COIN>USDT
+strategy("Masar Trend 55/10", overlay = true, initial_capital = 10000, currency = currency.USD,
+     commission_type = strategy.commission.percent, commission_value = 0.1, slippage = 2,
+     pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = false,
+     default_qty_type = strategy.fixed, default_qty_value = 0)
+
+// ---------- الإعدادات ----------
+entryN    = input.int(55, "قناة الدخول (أيام)", minval = 2, group = "الاستراتيجية")
+exitN     = input.int(10, "قناة الخروج (أيام)", minval = 2, group = "الاستراتيجية")
+atrN      = input.int(20, "طول ATR", minval = 2, group = "الاستراتيجية")
+stopATR   = input.float(2.0, "الوقف × ATR", minval = 0.5, step = 0.1, group = "الاستراتيجية")
+riskPct   = input.float(0.5, "المخاطرة % للصفقة", minval = 0.1, step = 0.1, group = "المخاطرة")
+shortMode = input.string("تلقائي (BTC/ETH فقط)", "البيع", options = ["تلقائي (BTC/ETH فقط)", "مسموح", "ممنوع"], group = "المخاطرة")
+useBtc    = input.bool(true, "تفعيل فلتر BTC", group = "فلتر BTC")
+btcSym    = input.symbol("OKX:BTCUSDT", "رمز BTC", group = "فلتر BTC")
+btcEntryN = input.int(55, "BTC: قناة بداية الاتجاه", minval = 2, group = "فلتر BTC")
+btcExitN  = input.int(20, "BTC: قناة نهاية الاتجاه", minval = 2, group = "فلتر BTC")
+showInfo  = input.bool(true, "إظهار لوحة المعلومات", group = "العرض")
+
+if not timeframe.isdaily
+    runtime.error("استخدم الإطار اليومي (D)")
+
+// ---------- حالة الاتجاه (مطابقة لكود البوت) ----------
+f_regime(int eN, int xN) =>
+    hhE = ta.highest(high, eN)[1]
+    llE = ta.lowest(low, eN)[1]
+    hhX = ta.highest(high, xN)[1]
+    llX = ta.lowest(low, xN)[1]
+    var int r = 0
+    if na(hhE)
+        r := 0
+    else if close > hhE
+        r := 1
+    else if close < llE
+        r := -1
+    else if r == 1 and close < llX
+        r := 0
+    else if r == -1 and close > hhX
+        r := 0
+    r
+
+reg    = f_regime(entryN, exitN)
+btcReg = request.security(btcSym, "D", f_regime(btcEntryN, btcExitN), lookahead = barmerge.lookahead_off)
+atr    = ta.atr(atrN)
+
+base     = syminfo.basecurrency
+isBtc    = base == "BTC"
+shortsOk = shortMode == "مسموح" or (shortMode == "تلقائي (BTC/ETH فقط)" and (base == "BTC" or base == "ETH"))
+gateL    = not useBtc or isBtc or btcReg == 1
+gateS    = not useBtc or isBtc or btcReg == -1
+
+hh55 = ta.highest(high, entryN)[1]
+ll55 = ta.lowest(low, entryN)[1]
+llX  = ta.lowest(low, exitN)[1]
+hhX  = ta.highest(high, exitN)[1]
+
+// ---------- الأوامر ----------
+var float stopPx = na
+pos     = strategy.position_size
+exitSig = (pos > 0 and reg != 1) or (pos < 0 and reg != -1)
+if exitSig
+    strategy.close_all(comment = "خروج القناة")
+
+fresh = reg != reg[1] and reg != 0 and not na(atr)
+if pos == 0 and not exitSig and fresh
+    dir = reg
+    okDir = dir == 1 ? gateL : (shortsOk and gateS)
+    if okDir
+        stp  = close - dir * stopATR * atr
+        dist = math.abs(close - stp)
+        qty  = math.min(strategy.equity * riskPct / 100 / dist, strategy.equity * 5 / close)
+        stopPx := stp
+        if dir == 1
+            strategy.entry("L", strategy.long, qty = qty, comment = "شراء")
+            strategy.exit("LS", "L", stop = stp, comment = "وقف")
+        else
+            strategy.entry("S", strategy.short, qty = qty, comment = "بيع")
+            strategy.exit("SS", "S", stop = stp, comment = "وقف")
+
+// ---------- الرسم ----------
+plot(hh55, "قمة 55 يوماً", color = color.new(color.teal, 30))
+plot(ll55, "قاع 55 يوماً", color = color.new(color.orange, 30))
+plot(pos > 0 ? llX : pos < 0 ? hhX : na, "مستوى الخروج (10 أيام)", color = color.new(color.purple, 0), style = plot.style_linebr, linewidth = 2)
+plot(pos != 0 ? stopPx : na, "الوقف", color = color.new(color.red, 0), style = plot.style_linebr)
+bgcolor(useBtc and btcReg == 1 ? color.new(color.green, 93) : useBtc and btcReg == -1 ? color.new(color.red, 93) : na, title = "اتجاه BTC")
+
+// ---------- لوحة المعلومات (ملصق؛ الجداول لا تظهر على الجوال) ----------
+var label info = na
+if showInfo and (barstate.islastconfirmedhistory or barstate.isrealtime)
+    label.delete(info)
+    nextHigh = ta.highest(high, entryN)
+    nextLow  = ta.lowest(low, entryN)
+    regTxt = reg == 1 ? "صاعد" : reg == -1 ? "هابط" : "محايد"
+    btcTxt = btcReg == 1 ? "صاعد ✅" : btcReg == -1 ? "هابط" : "محايد"
+    posTxt = pos > 0 ? "شراء مفتوح" : pos < 0 ? "بيع مفتوح" : "لا مركز"
+    wins = strategy.wintrades
+    n    = strategy.closedtrades
+    txt = "مسار " + base + "\n" +
+         "الاتجاه: " + regTxt + " | BTC: " + btcTxt + "\n" +
+         "المركز: " + posTxt + "\n" +
+         "للاختراق صعوداً: " + str.tostring((nextHigh / close - 1) * 100, "#.0") + "%\n" +
+         "للكسر هبوطاً: " + str.tostring((1 - nextLow / close) * 100, "#.0") + "%\n" +
+         "الصفقات: " + str.tostring(n) + " | الرابحة: " + (n > 0 ? str.tostring(wins / n * 100, "#") + "%" : "-") + "\n" +
+         "صافي الربح: " + str.tostring(strategy.netprofit, "#,###") + "$"
+    info := label.new(bar_index + 2, high, txt, style = label.style_label_left, color = color.new(color.black, 15),
+         textcolor = color.white, size = size.small, textalign = text.align_left)
