@@ -11,6 +11,7 @@ import ccxt
 from ..config import RISK
 from .base import BrokerError, inst_id
 from ..market import make_okx
+from ..guards import allowed_instrument
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +85,8 @@ class OKXLiveBroker:
 
     # ---------- orders ----------
     def open(self, asset, side, qty, ref_px, stop, clid):
+        if not allowed_instrument(asset, side):
+            raise BrokerError("not_whitelisted")
         inst = inst_id(asset, side)
         spec = self.market.inst(inst)
         tick = float(spec["tickSz"])
@@ -187,6 +190,26 @@ class OKXLiveBroker:
             return None, now
         fee = -float(o["fee"]) if o.get("feeCcy") == "USDT" else -float(o["fee"]) * float(o["avgPx"])
         return dict(px=float(o["avgPx"]), qty=pos["qty"], fee=fee, ts=int(o["fillTime"])), now
+
+    def activity_snapshot(self, since_ts):
+        """Everything on the sub-account that could reveal orders the bot did not place."""
+        snap = dict(orders=[], algos=[], fills=[], swap_positions=[], balances=[])
+        for t in ("SPOT", "SWAP"):
+            snap["orders"] += self._call(self.ex.private_get_trade_orders_pending, {"instType": t})
+            snap["algos"] += self._call(self.ex.private_get_trade_orders_algo_pending,
+                                        {"instType": t, "ordType": "conditional"})
+            fills = self._call(self.ex.private_get_trade_fills, {"instType": t, "begin": str(since_ts)})
+            for f in fills:                         # stop-triggered orders carry the algo's client id
+                if not f.get("clOrdId"):
+                    try:
+                        o = self._call(self.ex.private_get_trade_order, {"instId": f["instId"], "ordId": f["ordId"]}, tries=1)
+                        f["algoClOrdId"] = o[0].get("algoClOrdId", "") if o else ""
+                    except BrokerError:
+                        f["algoClOrdId"] = ""
+            snap["fills"] += fills
+        snap["swap_positions"] = self._call(self.ex.private_get_account_positions, {"instType": "SWAP"})
+        snap["balances"] = self._call(self.ex.private_get_account_balance, {})[0]["details"]
+        return snap
 
     def holdings_ok(self, pos):
         """Reconciliation: does the exchange still hold this position?"""

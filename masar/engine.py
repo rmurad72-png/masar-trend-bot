@@ -6,6 +6,7 @@ from .config import ASSETS, SHORTABLE, STRATEGY, RISK, COSTS
 from .signals import features, btc_regime, decide
 from .risk import size_position, cap_ok, drawdown
 from .brokers.base import BrokerError, make_clid
+from .guards import check_entry, fill_slip_pct, find_foreign_activity, LIMITS, REASON_AR
 
 log = logging.getLogger(__name__)
 DAY_MS = 86_400_000
@@ -51,6 +52,37 @@ class Engine:
         self.store.event("exit", acct, pos["asset"], dict(reason=reason, r=round(r, 2), pnl=round(pnl, 2)))
         return t
 
+    # ---------- counters & intrusion check ----------
+    def _count(self, acct, kind):
+        return int(self.store.get(f"{acct}_{kind}_{utc_day()}", 0))
+
+    def _bump(self, acct, kind):
+        self.store.set(f"{acct}_{kind}_{utc_day()}", self._count(acct, kind) + 1)
+
+    def intrusion_check(self, acct, br):
+        """Live only: anything on the sub-account the bot did not create pauses trading and alerts."""
+        if not hasattr(br, "activity_snapshot"):
+            return []
+        now = int(time.time() * 1000)
+        since = int(self.store.get(f"{acct}_activity_since", now - 3 * 86_400_000))
+        try:
+            snap = br.activity_snapshot(since)
+        except Exception as e:
+            return [("alert", acct, f"تعذّر فحص نشاط الحساب: {e}")]
+        findings = find_foreign_activity(snap, self.store.positions(acct), since)
+        seen = set(self.store.get(f"{acct}_foreign_seen", []))
+        new = [f for f in findings if f"{f['kind']}:{f['id']}" not in seen]
+        self.store.set(f"{acct}_activity_since", now - 600_000)     # 10 min overlap
+        if not new:
+            return []
+        seen |= {f"{f['kind']}:{f['id']}" for f in new}
+        self.store.set(f"{acct}_foreign_seen", sorted(seen)[-500:])
+        self.store.set(f"{acct}_paused", True)
+        self.store.event("intrusion", acct, detail=new)
+        lines = "\n".join(f"• {f['kind']}: {f['detail']}" for f in new[:10])
+        return [("alert", acct, "نشاط في الحساب لم ينفذه البوت! أوقفت الصفقات الجديدة.\n" + lines +
+                 "\nإن لم تكن أنت: احذف مفتاح API فوراً من OKX وأنشئ مفتاحاً جديداً.")]
+
     # ---------- hourly ----------
     def hourly(self):
         """Stops hit, stop health (live), heartbeat. Returns list of message events."""
@@ -71,6 +103,8 @@ class Engine:
                 except Exception as e:
                     log.exception("hourly %s %s", acct, pos["asset"])
                     out.append(("alert", acct, f"خطأ في فحص {pos['asset']}: {e}"))
+            if acct == "live":
+                out += self.intrusion_check(acct, br)
         self.store.set("heartbeat", int(time.time() * 1000))
         return out
 
@@ -115,6 +149,10 @@ class Engine:
                 continue
             dec, _ = decide(pos["asset"], f, pos["side"], btc_today, True, SHORTABLE, STRATEGY.stop_atr, 1e-12)
             if dec and dec.action == "exit":
+                if self._count(acct, "orders") >= LIMITS.max_orders_per_day:
+                    out.append(("alert", acct, f"تجاوز حد الأوامر اليومي، لم يُغلق {pos['asset']}"))
+                    continue
+                self._bump(acct, "orders")
                 try:
                     fill = br.close(pos, prices.get(pos["asset"], float(f["c"].iloc[-1])), make_clid("x", ds, pos["asset"], acct))
                     out.append(("exit", acct, self._record_close(acct, pos, fill, "channel")))
@@ -171,12 +209,22 @@ class Engine:
                 self.store.event("skip", acct, a, dict(reason="below_min", qty=qty))
                 out.append(("skip", acct, dict(asset=a, reason="below_min")))
                 continue
+            block = check_entry(a, dec.side, qty, ref, dec.close, eq,
+                                self._count(acct, "entries"), self._count(acct, "orders"))
+            if block:
+                self.store.event("blocked", acct, a, dict(reason=block, qty=qty, ref=ref, close=dec.close))
+                out.append(("alert", acct, f"منعت حماية البوت أمر {a}: {REASON_AR.get(block, block)} ({block})"))
+                continue
             clid = make_clid("e", ds, a, acct)
+            self._bump(acct, "orders")
             try:
                 fill = br.open(a, dec.side, qty, ref, dec.stop, clid)
             except BrokerError as e:
                 out.append(("alert", acct, f"فشل فتح {a}: {e}"))
                 continue
+            self._bump(acct, "entries")
+            if fill_slip_pct(fill["px"], ref) > LIMITS.max_fill_slip_pct:
+                out.append(("alert", acct, f"تنفيذ {a} بسعر {fill['px']} بعيد عن السعر المرجعي {ref}"))
             pos = dict(account=acct, asset=a, side=dec.side, market="spot" if dec.side == 1 else "swap",
                        qty=fill["qty"], entry_px=fill["px"], stop_px=dec.stop,
                        risk_cash=fill["qty"] * abs(fill["px"] - dec.stop), risk_pct=RISK.risk_pct,
