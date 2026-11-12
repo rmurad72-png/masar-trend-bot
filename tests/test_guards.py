@@ -65,3 +65,55 @@ def test_engine_blocks_price_jump(monkeypatch):
     ev = eng.daily()
     assert not st.positions("paper")
     assert any(e[0] == "alert" and "price_jump" in e[2] for e in ev)
+
+
+def _live_engine(monkeypatch, equity, flow):
+    from tests.fakes import trend_frame, FakeMarket
+    from masar.store import Store
+    from masar.engine import Engine
+    from masar.config import Settings, ASSETS
+    fr = trend_frame(n=101)
+    monkeypatch.setattr("masar.engine.utc_day", lambda ts=None: int(fr.index[-1]) + 1)
+
+    class FakeLive:
+        account = "live"
+        def check_stop(self, pos): return None, 0
+        def verify_stop(self, pos): return True
+        def activity_snapshot(self, since): return {}
+        def holdings_ok(self, pos): return True
+        def equity(self, prices=None): return equity
+        def free_cash(self, prices=None): return equity
+        def min_qty(self, a, side): return 0.0
+        def transfers_since(self, since, prices=None): return flow
+        def open(self, *a): return dict(px=a[3], qty=a[2], fee=0.0, ts=0, algo_id="x")
+
+    st = Store("sqlite:///:memory:")
+    m = FakeMarket({"BTC": fr}, {a: float(fr["c"].iloc[-1]) for a in ASSETS})
+    return Engine(Settings(), st, m, {"live": FakeLive()}), st
+
+
+def test_withdrawal_is_not_drawdown(monkeypatch):
+    eng, st = _live_engine(monkeypatch, equity=40.0, flow=-45.0)
+    st.set("live_peak", 85.0)
+    ev = eng.daily()
+    assert not st.get("live_paused", False)              # 85 - 45 = 40 -> no drawdown
+    assert any(e[0] == "info" for e in ev)
+
+
+def test_empty_account_skips_without_drawdown(monkeypatch):
+    eng, st = _live_engine(monkeypatch, equity=0.0, flow=0.0)
+    st.set("live_peak", 85.0)
+    ev = eng.daily()
+    assert not st.get("live_paused", False) and not st.positions("live")
+    assert any(e[0] == "alert" and "بلا رصيد" in e[2] for e in ev)
+
+
+def test_deposit_after_empty_account(monkeypatch):
+    eng, st = _live_engine(monkeypatch, equity=0.0, flow=0.0)
+    st.set("live_peak", 85.0)
+    eng.daily()
+    eng2, _ = _live_engine(monkeypatch, equity=85.0, flow=85.0)
+    eng2.store = st; eng2.brokers["live"].__class__.equity = lambda self, p=None: 85.0
+    st.set("daily_done", 0)
+    eng2.daily()
+    assert st.get("live_peak") == 85.0 and not st.get("live_paused", False)

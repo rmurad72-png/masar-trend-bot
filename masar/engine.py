@@ -161,7 +161,31 @@ class Engine:
                     out.append(("alert", acct, f"فشل إغلاق {pos['asset']}: {e}"))
         # 3) equity, peak, drawdown pause
         eq = br.equity(prices)
-        peak = max(self.store.get(f"{acct}_peak", eq), eq)
+        peak = self.store.get(f"{acct}_peak", eq)
+        # deposits/withdrawals are not profit or loss: move the peak by the same amount
+        if hasattr(br, "transfers_since"):
+            now = int(time.time() * 1000)
+            since = int(self.store.get(f"{acct}_flows_since", now - 86_400_000))
+            try:
+                flow = br.transfers_since(since, prices)
+                self.store.set(f"{acct}_flows_since", now)
+                if abs(flow) >= 0.01:
+                    peak = max(peak + flow, 0.0)
+                    self.store.event("transfer", acct, detail=dict(usd=round(flow, 2)))
+                    out.append(("info", acct, f"تحويل رصيد {flow:+.2f}$ — لا يُحسب ربحاً أو خسارة، وعُدّل حساب التراجع"))
+            except Exception as e:
+                log.warning("transfers_since: %s", e)
+        if eq < 1.0:
+            # an empty account is not a drawdown: skip entries, keep any pause state as it is.
+            # Peak goes to 0 so a later deposit restarts the drawdown count from the new balance.
+            self.store.set(f"{acct}_peak", 0.0)
+            self.store.save_equity(acct, sig_day + 1, eq)
+            if not self.store.get(f"{acct}_empty_warned", False):
+                self.store.set(f"{acct}_empty_warned", True)
+                out.append(("alert", acct, "الحساب بلا رصيد في حساب التداول. لا صفقات جديدة حتى يعود الرصيد."))
+            return out
+        self.store.set(f"{acct}_empty_warned", False)
+        peak = max(peak, eq)
         self.store.set(f"{acct}_peak", peak)
         self.store.save_equity(acct, sig_day + 1, eq)
         dd = drawdown(eq, peak)

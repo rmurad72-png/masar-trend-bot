@@ -211,6 +211,21 @@ class OKXLiveBroker:
         snap["balances"] = self._call(self.ex.private_get_account_balance, {})[0]["details"]
         return snap
 
+    def transfers_since(self, since_ts, prices=None):
+        """Net USD value moved into (+) or out of (-) the trading account by transfers since since_ts.
+        Uses the account bills (last 7 days), bill type 1 = transfer."""
+        bills = self._call(self.ex.private_get_account_bills, {"type": "1", "begin": str(since_ts)})
+        total = 0.0
+        for b in bills:
+            if int(b.get("ts", 0)) <= since_ts:
+                continue
+            chg, ccy = float(b.get("balChg") or 0), b.get("ccy")
+            if ccy in ("USDT", "USDC", "USD"):
+                total += chg
+            elif prices and ccy in prices:
+                total += chg * prices[ccy]
+        return total
+
     def holdings_ok(self, pos):
         """Reconciliation: does the exchange still hold this position?"""
         if pos["side"] == 1:

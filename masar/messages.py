@@ -40,6 +40,8 @@ def event_text(ev):
         return f"{head}\n⏭️ إشارة {data['asset']} مرفوضة: {SKIP.get(data['reason'], data['reason'])}"
     if kind == "alert":
         return f"{head}\n🚨 {data}"
+    if kind == "info":
+        return f"{head}\nℹ️ {data}"
     return str(data)
 
 
@@ -53,6 +55,9 @@ def status_text(engine, prices):
         pos = s.positions(acct)
         risk = sum(p["risk_pct"] for p in pos)
         paused = "⏸️ متوقف" if s.get(f"{acct}_paused", False) else "▶️ يعمل"
+        if eq < 1.0:
+            lines.append(f"\n{ACCT[acct]} — {paused}\n⚪ بلا رصيد في حساب التداول")
+            continue
         lines.append(f"\n{ACCT[acct]} — {paused}\nالرصيد: {eq:,.2f}$ | التراجع: {dd:.1f}%\n"
                      f"المراكز: {len(pos)} | المخاطرة المفتوحة: {risk:.1f}% من 5%")
         for p in pos:
