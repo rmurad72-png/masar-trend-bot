@@ -61,6 +61,7 @@ def features(d: pd.DataFrame, entry_n=55, exit_n=10, atr_n=20) -> pd.DataFrame:
     d["atr"] = rma(tr.to_numpy(float), atr_n)
     d["reg"] = regime_series(d, entry_n, exit_n)
     d["hhE"] = d["h"].rolling(entry_n).max().shift(1)     # breakout level used today
+    d["llE"] = d["l"].rolling(entry_n).min().shift(1)     # breakdown level used today
     d["llX"] = d["l"].rolling(exit_n).min().shift(1)      # long exit level used today
     d["hhX"] = d["h"].rolling(exit_n).max().shift(1)      # short exit level used today
     return d

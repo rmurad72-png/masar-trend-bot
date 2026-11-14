@@ -105,7 +105,7 @@ def test_empty_account_skips_without_drawdown(monkeypatch):
     st.set("live_peak", 85.0)
     ev = eng.daily()
     assert not st.get("live_paused", False) and not st.positions("live")
-    assert any(e[0] == "alert" and "بلا رصيد" in e[2] for e in ev)
+    assert any(e[0] == "info" and "بلا رصيد" in e[2] for e in ev)
 
 
 def test_deposit_after_empty_account(monkeypatch):

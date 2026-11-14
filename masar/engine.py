@@ -7,6 +7,7 @@ from .signals import features, btc_regime, decide
 from .risk import size_position, cap_ok, drawdown
 from .brokers.base import BrokerError, make_clid
 from .guards import check_entry, fill_slip_pct, find_foreign_activity, LIMITS, REASON_AR
+from .journal import entry_context, update_excursion, r_of, lesson, dumps, loads, journal_stats
 
 log = logging.getLogger(__name__)
 DAY_MS = 86_400_000
@@ -24,6 +25,16 @@ class Engine:
     def __init__(self, settings, store, market, brokers):
         self.s, self.store, self.market, self.brokers = settings, store, market, brokers
         self.feat, self.btc_reg = {}, None
+        self._px = {}
+        self._number_legacy()
+
+    def _number_legacy(self):
+        """Positions opened before the journal existed get trade numbers in entry order."""
+        for acct in self.brokers:
+            for p in sorted(self.store.positions(acct), key=lambda x: x["entry_ts"]):
+                if p.get("trade_no") is None:
+                    p["trade_no"] = self.store.next_trade_no(acct)
+                    self.store.save_position(p)
 
     # ---------- data ----------
     def load_features(self):
@@ -39,18 +50,44 @@ class Engine:
     def prices(self):
         data = self.market.ex.public_get_market_tickers({"instType": "SPOT"})["data"]
         m = {x["instId"]: float(x["last"]) for x in data}
-        return {a: m[f"{a}-USDT"] for a in ASSETS if f"{a}-USDT" in m}
+        self._px = {a: m[f"{a}-USDT"] for a in ASSETS if f"{a}-USDT" in m}
+        return self._px
+
+    def ensure_features(self):
+        if not self.feat or self.btc_reg is None:
+            self.load_features()
 
     # ---------- trade bookkeeping ----------
-    def _record_close(self, acct, pos, fill, reason):
-        pnl = pos["side"] * pos["qty"] * (fill["px"] - pos["entry_px"]) - pos["fees"] - fill["fee"]
+    def _record_close(self, acct, pos, fill, reason, ref=None):
+        side = pos["side"]
+        pnl = side * pos["qty"] * (fill["px"] - pos["entry_px"]) - pos["fees"] - fill["fee"]
         r = pnl / pos["risk_cash"] if pos["risk_cash"] else 0.0
-        t = dict(account=acct, asset=pos["asset"], side=pos["side"], entry_ts=pos["entry_ts"], exit_ts=fill["ts"],
-                 entry_px=pos["entry_px"], exit_px=fill["px"], qty=pos["qty"], pnl=pnl, r=r, reason=reason)
+        # the exit price itself is part of the path
+        best = pos.get("best_px") if pos.get("best_px") is not None else pos["entry_px"]
+        worst = pos.get("worst_px") if pos.get("worst_px") is not None else pos["entry_px"]
+        if side * (fill["px"] - best) > 0:
+            best, pos["best_ts"] = fill["px"], fill["ts"]
+        if side * (fill["px"] - worst) < 0:
+            worst, pos["worst_ts"] = fill["px"], fill["ts"]
+        exit_slip = side * (ref - fill["px"]) / ref * 100 if ref else None
+        t = dict(account=acct, asset=pos["asset"], side=side, entry_ts=pos["entry_ts"], exit_ts=fill["ts"],
+                 entry_px=pos["entry_px"], exit_px=fill["px"], qty=pos["qty"], pnl=pnl, r=r, reason=reason,
+                 trade_no=pos.get("trade_no"), ctx=pos.get("ctx"), stop_px=pos["stop_px"],
+                 mfe_r=r_of(pos, best), mae_r=r_of(pos, worst), mfe_ts=pos.get("best_ts"), mae_ts=pos.get("worst_ts"),
+                 fees=pos["fees"] + fill["fee"], entry_slip=pos.get("entry_slip"), exit_slip=exit_slip,
+                 signal_close=pos.get("signal_close"))
+        les = lesson(t)
+        t["lesson"] = dumps(les)
         self.store.add_trade(t)
         self.store.delete_position(acct, pos["asset"])
-        self.store.event("exit", acct, pos["asset"], dict(reason=reason, r=round(r, 2), pnl=round(pnl, 2)))
-        return t
+        self.store.event("exit", acct, pos["asset"], dict(no=t["trade_no"], reason=reason, r=round(r, 2),
+                                                           pnl=round(pnl, 2), type=les["type"]))
+        msg = dict(t, lesson_obj=les, ctx_obj=loads(t["ctx"]), stats=journal_stats(self.store.trades(acct)))
+        try:
+            msg["equity_after"] = self.brokers[acct].equity(self._px)
+        except Exception:
+            msg["equity_after"] = None
+        return msg
 
     # ---------- counters & intrusion check ----------
     def _count(self, acct, kind):
@@ -90,9 +127,15 @@ class Engine:
         for acct, br in self.brokers.items():
             for pos in self.store.positions(acct):
                 try:
+                    since = pos.get("ext_ts") or (pos["entry_ts"] // 3_600_000) * 3_600_000 - 1
+                    if update_excursion(pos, self.market.hourly_since(f"{pos['asset']}-USDT", since)):
+                        self.store.save_position(pos)
+                except Exception as e:
+                    log.warning("excursion %s %s: %s", acct, pos["asset"], e)
+                try:
                     fill, checked = br.check_stop(pos)
                     if fill:
-                        out.append(("exit", acct, self._record_close(acct, pos, fill, "stop")))
+                        out.append(("exit", acct, self._record_close(acct, pos, fill, "stop", ref=pos["stop_px"])))
                         continue
                     pos["checked_ts"] = checked
                     self.store.save_position(pos)
@@ -155,7 +198,7 @@ class Engine:
                 self._bump(acct, "orders")
                 try:
                     fill = br.close(pos, prices.get(pos["asset"], float(f["c"].iloc[-1])), make_clid("x", ds, pos["asset"], acct))
-                    out.append(("exit", acct, self._record_close(acct, pos, fill, "channel")))
+                    out.append(("exit", acct, self._record_close(acct, pos, fill, "channel", ref=float(f["c"].iloc[-1]))))
                     exited.add(pos["asset"])
                 except Exception as e:
                     out.append(("alert", acct, f"فشل إغلاق {pos['asset']}: {e}"))
@@ -172,6 +215,7 @@ class Engine:
                 if abs(flow) >= 0.01:
                     peak = max(peak + flow, 0.0)
                     self.store.event("transfer", acct, detail=dict(usd=round(flow, 2)))
+                    self.store.set(f"{acct}_bench_start", sig_day + 1)
                     out.append(("info", acct, f"تحويل رصيد {flow:+.2f}$ — لا يُحسب ربحاً أو خسارة، وعُدّل حساب التراجع"))
             except Exception as e:
                 log.warning("transfers_since: %s", e)
@@ -182,7 +226,7 @@ class Engine:
             self.store.save_equity(acct, sig_day + 1, eq)
             if not self.store.get(f"{acct}_empty_warned", False):
                 self.store.set(f"{acct}_empty_warned", True)
-                out.append(("alert", acct, "الحساب بلا رصيد في حساب التداول. لا صفقات جديدة حتى يعود الرصيد."))
+                out.append(("info", acct, "الحساب بلا رصيد في حساب التداول. لا صفقات جديدة حتى يعود الرصيد."))
             return out
         self.store.set(f"{acct}_empty_warned", False)
         peak = max(peak, eq)
@@ -249,16 +293,91 @@ class Engine:
             self._bump(acct, "entries")
             if fill_slip_pct(fill["px"], ref) > LIMITS.max_fill_slip_pct:
                 out.append(("alert", acct, f"تنفيذ {a} بسعر {fill['px']} بعيد عن السعر المرجعي {ref}"))
+            ctx = entry_context(f, dec.side, self.btc_reg.loc[:sig_day], list(open_now.values()), eq,
+                                fill["qty"] * fill["px"])
+            hour0 = (fill["ts"] // 3_600_000) * 3_600_000 - 1
             pos = dict(account=acct, asset=a, side=dec.side, market="spot" if dec.side == 1 else "swap",
                        qty=fill["qty"], entry_px=fill["px"], stop_px=dec.stop,
                        risk_cash=fill["qty"] * abs(fill["px"] - dec.stop), risk_pct=RISK.risk_pct,
                        entry_ts=fill["ts"], clid=clid, algo_id=fill.get("algo_id"),
-                       checked_ts=(fill["ts"] // 3_600_000) * 3_600_000 - 1, fees=fill["fee"])
+                       checked_ts=hour0, fees=fill["fee"], trade_no=self.store.next_trade_no(acct),
+                       ctx=dumps(ctx), signal_close=dec.close,
+                       entry_slip=dec.side * (fill["px"] - dec.close) / dec.close * 100,
+                       best_px=fill["px"], worst_px=fill["px"], best_ts=fill["ts"], worst_ts=fill["ts"], ext_ts=hour0)
             self.store.save_position(pos)
             open_now[a] = pos
-            self.store.event("entry", acct, a, dict(side=dec.side, px=fill["px"], stop=dec.stop))
-            out.append(("entry", acct, pos))
+            self.store.event("entry", acct, a, dict(no=pos["trade_no"], side=dec.side, px=fill["px"], stop=dec.stop))
+            out.append(("entry", acct, dict(pos, ctx_obj=ctx, open_risk=sum(p["risk_pct"] for p in open_now.values()))))
         return out
+
+    # ---------- watch & evening heads-up ----------
+    def levels(self, a):
+        """Tomorrow's decision levels from the last confirmed day."""
+        f = self.feat[a]
+        return dict(hh55=float(f["h"].iloc[-55:].max()), ll55=float(f["l"].iloc[-55:].min()),
+                    hh10=float(f["h"].iloc[-10:].max()), ll10=float(f["l"].iloc[-10:].min()),
+                    hh20=float(f["h"].iloc[-20:].max()), ll20=float(f["l"].iloc[-20:].min()),
+                    reg=int(f["reg"].iloc[-1]))
+
+    def open_positions_all(self):
+        return [(acct, p) for acct in self.brokers for p in self.store.positions(acct)]
+
+    def watch_data(self, prices):
+        self.ensure_features()
+        btc_r = int(self.btc_reg.iloc[-1])
+        b = self.levels("BTC")
+        held = {(p["asset"], p["side"]) for _, p in self.open_positions_all()}
+        longs, shorts = [], []
+        for a in self.feat:
+            px = prices.get(a)
+            if not px:
+                continue
+            lv = self.levels(a)
+            if (a, 1) not in held:
+                longs.append(dict(asset=a, dist=(lv["hh55"] / px - 1) * 100, in_trend=lv["reg"] == 1,
+                                  blocked=a != "BTC" and btc_r != 1))
+            if a in SHORTABLE:
+                shorts.append(dict(asset=a, dist=(1 - lv["ll55"] / px) * 100, in_trend=lv["reg"] == -1,
+                                   held=(a, -1) in held, blocked=a != "BTC" and btc_r != -1))
+        longs.sort(key=lambda x: x["dist"])
+        opens = []
+        for acct, p in self.open_positions_all():
+            px = prices.get(p["asset"])
+            if not px or p["asset"] not in self.feat:
+                continue
+            lv = self.levels(p["asset"])
+            ex = lv["ll10"] if p["side"] == 1 else lv["hh10"]
+            opens.append(dict(acct=acct, pos=p, px=px, exit=ex, exit_dist=p["side"] * (px / ex - 1) * 100,
+                              stop_dist=p["side"] * (px / p["stop_px"] - 1) * 100, r=r_of(p, px)))
+        return dict(btc_reg=btc_r, btc=b, btc_px=prices.get("BTC"), longs=longs, shorts=shorts, opens=opens)
+
+    def evening_items(self, prices, near_pct=3.0):
+        """Assets that could trigger at tonight's close (information only; nothing is executed)."""
+        w = self.watch_data(prices)
+        items = []
+        for x in w["longs"]:
+            if not x["in_trend"] and x["dist"] <= near_pct:
+                items.append(dict(kind="long", **x))
+        for x in w["shorts"]:
+            if not x["held"] and not x["in_trend"] and x["dist"] <= near_pct:
+                items.append(dict(kind="short", **x))
+        for o in w["opens"]:
+            if o["exit_dist"] <= near_pct:
+                items.append(dict(kind="exit", asset=o["pos"]["asset"], acct=o["acct"], side=o["pos"]["side"],
+                                  dist=o["exit_dist"], level=o["exit"], r=o["r"]))
+        return items
+
+    def btc_closes(self):
+        self.ensure_features()
+        return self.feat["BTC"]["c"]
+
+    def bench_start(self, acct):
+        curve = self.store.equity_curve(acct)
+        start = self.store.get(f"{acct}_bench_start")
+        first = next((r["day"] for r in curve if r["equity"] >= 1), None)
+        empty_days = [r["day"] for r in curve if r["equity"] < 1]
+        cands = [x for x in (start, first, (max(empty_days) + 1) if empty_days else None) if x is not None]
+        return max(cands) if cands else None
 
     # ---------- manual controls ----------
     def close_all(self, acct=None):
@@ -270,9 +389,9 @@ class Engine:
             self.store.set(f"{a}_paused", True)
             for pos in self.store.positions(a):
                 try:
-                    fill = br.close(pos, prices.get(pos["asset"], pos["entry_px"]),
-                                    make_clid("c", day_str(utc_day()), pos["asset"], a))
-                    out.append(("exit", a, self._record_close(a, pos, fill, "manual")))
+                    ref = prices.get(pos["asset"], pos["entry_px"])
+                    fill = br.close(pos, ref, make_clid("c", day_str(utc_day()), pos["asset"], a))
+                    out.append(("exit", a, self._record_close(a, pos, fill, "manual", ref=ref)))
                 except Exception as e:
                     out.append(("alert", a, f"فشل إغلاق {pos['asset']}: {e}"))
         return out

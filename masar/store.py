@@ -24,8 +24,19 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)""",
 ]
 
+# journal columns added after v0.1 (migrated in place with ALTER TABLE)
+POS_EXTRA = [("trade_no", "INTEGER"), ("ctx", "TEXT"), ("signal_close", "DOUBLE PRECISION"),
+             ("entry_slip", "DOUBLE PRECISION"), ("best_px", "DOUBLE PRECISION"), ("worst_px", "DOUBLE PRECISION"),
+             ("best_ts", "BIGINT"), ("worst_ts", "BIGINT"), ("ext_ts", "BIGINT")]
+TRADE_EXTRA = [("trade_no", "INTEGER"), ("ctx", "TEXT"), ("stop_px", "DOUBLE PRECISION"),
+               ("mfe_r", "DOUBLE PRECISION"), ("mae_r", "DOUBLE PRECISION"), ("mfe_ts", "BIGINT"), ("mae_ts", "BIGINT"),
+               ("fees", "DOUBLE PRECISION"), ("entry_slip", "DOUBLE PRECISION"), ("exit_slip", "DOUBLE PRECISION"),
+               ("signal_close", "DOUBLE PRECISION"), ("lesson", "TEXT")]
+
 POS_COLS = ["account", "asset", "side", "market", "qty", "entry_px", "stop_px", "risk_cash", "risk_pct",
-            "entry_ts", "clid", "algo_id", "checked_ts", "fees"]
+            "entry_ts", "clid", "algo_id", "checked_ts", "fees"] + [c for c, _ in POS_EXTRA]
+TRADE_COLS = ["account", "asset", "side", "entry_ts", "exit_ts", "entry_px", "exit_px", "qty", "pnl", "r",
+              "reason"] + [c for c, _ in TRADE_EXTRA]
 
 
 class Store:
@@ -42,6 +53,20 @@ class Store:
             serial = "INTEGER PRIMARY KEY AUTOINCREMENT"
         for s in SCHEMA:
             self._exec(s.replace("{serial}", serial))
+        self._migrate()
+
+    def _migrate(self):
+        for table, extra in (("positions", POS_EXTRA), ("trades", TRADE_EXTRA)):
+            have = self._columns(table)
+            for col, typ in extra:
+                if col not in have:
+                    self._exec(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+
+    def _columns(self, table):
+        if self.pg:
+            r = self._rows("SELECT column_name FROM information_schema.columns WHERE table_name=?", (table,))
+            return {x["column_name"] for x in r}
+        return {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
     def try_single_instance_lock(self):
         """Postgres session advisory lock: only one bot process may trade. SQLite: always True."""
@@ -81,7 +106,7 @@ class Store:
 
     def save_position(self, p: dict):
         self._exec("DELETE FROM positions WHERE account=? AND asset=?", (p["account"], p["asset"]))
-        cols = [c for c in POS_COLS if c in p]
+        cols = [c for c in POS_COLS if c in p and p[c] is not None]
         self._exec(f"INSERT INTO positions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                    tuple(p[c] for c in cols))
 
@@ -90,9 +115,22 @@ class Store:
 
     # ---------- trades / events / equity ----------
     def add_trade(self, t: dict):
-        cols = ["account", "asset", "side", "entry_ts", "exit_ts", "entry_px", "exit_px", "qty", "pnl", "r", "reason"]
+        cols = [c for c in TRADE_COLS if t.get(c) is not None]
         self._exec(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                    tuple(t[c] for c in cols))
+
+    def trade_by_no(self, account, no):
+        r = self._rows("SELECT * FROM trades WHERE account=? AND trade_no=?", (account, no))
+        return r[0] if r else None
+
+    def position_by_no(self, account, no):
+        r = self._rows("SELECT * FROM positions WHERE account=? AND trade_no=?", (account, no))
+        return r[0] if r else None
+
+    def next_trade_no(self, account):
+        n = int(self.get(f"{account}_trade_seq", 0)) + 1
+        self.set(f"{account}_trade_seq", n)
+        return n
 
     def trades(self, account, since_ts=0):
         return self._rows("SELECT * FROM trades WHERE account=? AND exit_ts>=? ORDER BY exit_ts", (account, since_ts))

@@ -2,15 +2,19 @@
 import asyncio
 import logging
 import time
-from datetime import time as dtime, timezone, datetime
+from datetime import time as dtime, timezone, datetime, timedelta
+import csv
+import io
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from . import messages as M
 
 log = logging.getLogger(__name__)
 HELP = ("🤖 بوت مسار — متابعة الاتجاه\n\n"
-        "/status الرصيد والمراكز والتراجع\n/positions تفاصيل المراكز\n/watch الأقرب للاختراق\n"
-        "/report ملخص الأداء\n/pause إيقاف الصفقات الجديدة\n/resume استئنافها\n"
+        "/status الرصيد والمراكز والتراجع\n/positions تفاصيل المراكز\n/watch المراقبة: BTC والأقرب للدخول والمراكز\n"
+        "/report الأداء ومقارنته بالبيتكوين\n/trade <رقم> بطاقة صفقة كاملة (أضف live للحساب الحقيقي)\n"
+        "/journal سجل الدروس مقابل الباك تست\n/export ملف CSV بكل الصفقات\n"
+        "/pause إيقاف الصفقات الجديدة\n/resume استئنافها\n"
         "/close_all إغلاق كل شيء (يطلب تأكيداً)\n/run_now تشغيل الدورة اليومية الآن (إن لم تُنفّذ اليوم)")
 
 
@@ -22,12 +26,14 @@ class MasarBot:
         for name, fn in [("start", self.help), ("help", self.help), ("status", self.status),
                          ("positions", self.positions), ("watch", self.watch), ("report", self.report),
                          ("pause", self.pause), ("resume", self.resume), ("close_all", self.close_all),
-                         ("run_now", self.run_now)]:
+                         ("run_now", self.run_now), ("trade", self.trade), ("journal", self.journal),
+                         ("export", self.export)]:
             self.app.add_handler(CommandHandler(name, self._guard(fn)))
         self.app.add_handler(CallbackQueryHandler(self._guard(self.on_button)))
         jq = self.app.job_queue
         jq.run_daily(self.job_daily, time=dtime(0, 0, 30, tzinfo=timezone.utc), name="daily")
         jq.run_repeating(self.job_hourly, interval=3600, first=self._next_hour_offset(), name="hourly")
+        jq.run_daily(self.job_evening, time=dtime(20, 0, 0, tzinfo=timezone.utc), name="evening")   # 23:00 Riyadh
         jq.run_once(self.job_startup, when=5)
 
     @staticmethod
@@ -127,9 +133,27 @@ class MasarBot:
         n_in = sum(1 for e in events if e[0] == "entry")
         n_out = sum(1 for e in events if e[0] == "exit")
         await self.send(f"🗓️ التقرير اليومي\nدخول: {n_in} | خروج: {n_out}\n\n" + M.status_text(self.engine, prices))
-        if datetime.now(timezone.utc).weekday() == 6:     # Sunday
+        now = datetime.now(timezone.utc)
+        if now.weekday() == 6:     # Sunday
             since = int((time.time() - 7 * 86400) * 1000)
             await self.send(M.report_text(self.engine, since, "📅 التقرير الأسبوعي (آخر 7 أيام)"))
+        if now.day == 1:           # monthly "what did we learn"
+            first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            prev = (first - timedelta(days=1)).replace(day=1)
+            label = prev.strftime("%Y-%m")
+            await self.send(M.monthly_text(self.engine, int(prev.timestamp() * 1000), label))
+
+    async def job_evening(self, ctx):
+        if not self.s.trading_allowed:
+            return
+        try:
+            prices = await self._run(self.engine.prices)
+            items = await self._run(self.engine.evening_items, prices)
+            text = M.evening_text(items)
+            if text:
+                await self.send(text)
+        except Exception as e:
+            log.exception("evening")
 
     async def job_hourly(self, ctx):
         if not self.s.trading_allowed:
@@ -153,13 +177,49 @@ class MasarBot:
         await update.message.reply_text(M.positions_text(self.engine, prices))
 
     async def watch(self, update, ctx):
-        if not self.engine.feat:
-            await self._run(self.engine.load_features)
+        await self._run(self.engine.ensure_features)
         prices = await self._run(self.engine.prices)
-        await update.message.reply_text(M.watch_text(self.engine, prices))
+        await self.send(M.watch_text(self.engine, prices))
 
     async def report(self, update, ctx):
+        await self._run(self.engine.ensure_features)
         await update.message.reply_text(M.report_text(self.engine))
+
+    async def trade(self, update, ctx):
+        args = ctx.args or []
+        nums = [a.lstrip("#") for a in args if a.lstrip("#").isdigit()]
+        if not nums:
+            await update.message.reply_text("اكتب رقم الصفقة، مثل: /trade 1  أو  /trade 1 live")
+            return
+        acct = "live" if any(a.lower() in ("live", "حقيقي") for a in args) else None
+        if acct and acct not in self.engine.brokers:
+            acct = None
+        prices = await self._run(self.engine.prices)
+        if acct is None and "paper" in self.engine.brokers:
+            acct_try = "paper" if (self.engine.store.position_by_no("paper", int(nums[0]))
+                                   or self.engine.store.trade_by_no("paper", int(nums[0]))) else None
+            acct = acct_try
+        await self.send(M.trade_card(self.engine, int(nums[0]), acct, prices))
+
+    async def journal(self, update, ctx):
+        await self.send(M.journal_text(self.engine))
+
+    async def export(self, update, ctx):
+        buf = io.StringIO()
+        cols = ["account", "trade_no", "status", "asset", "side", "entry_ts", "exit_ts", "entry_px", "exit_px",
+                "stop_px", "qty", "pnl", "r", "mfe_r", "mae_r", "reason", "lesson_type", "entry_slip", "exit_slip",
+                "fees", "ctx"]
+        w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for acct in self.engine.brokers:
+            for t in self.engine.store.trades(acct):
+                w.writerow(dict(t, status="closed", lesson_type=M.loads(t.get("lesson")).get("type")))
+            for p in self.engine.store.positions(acct):
+                w.writerow(dict(p, status="open"))
+        data = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+        await self.app.bot.send_document(self.s.telegram_chat_id, document=data,
+                                         filename=f"masar_trades_{datetime.now(timezone.utc):%Y%m%d}.csv",
+                                         caption="📤 سجل صفقات مسار (المغلقة والمفتوحة)")
 
     async def pause(self, update, ctx):
         for a in self.engine.brokers:
