@@ -60,3 +60,31 @@ def test_evening_text():
     txt = M.evening_text([dict(kind="long", asset="INJ", dist=2.1, blocked=True),
                           dict(kind="exit", asset="BTC", acct="paper", side=-1, dist=0.8, level=81200, r=1.5)])
     assert "فلتر BTC" in txt and "قد تُغلق" in txt
+
+
+def test_protection_states():
+    from masar.journal import protection
+    short = dict(side=-1, entry_px=75000.0, stop_px=79362.4)
+    pr = protection(short, 81200.0)                       # exit level beyond stop -> stop governs
+    assert not pr["by_exit"] and pr["locked_r"] == pytest.approx(-1.0) and not pr["protected"]
+    pr = protection(short, 77000.0)                       # exit level nearer than stop, still above entry
+    assert pr["by_exit"] and -1 < pr["locked_r"] < 0
+    pr = protection(short, 70000.0)                       # below entry -> profit locked
+    assert pr["protected"] and pr["locked_r"] == pytest.approx((75000 - 70000) / 4362.4)
+    lines = M.protection_lines(short, 81200.0)
+    assert "غير محمي" in lines[0] and "−" not in lines[0]
+    assert "محمية تقريباً" in M.protection_lines(short, 70000.0)[0]
+    long = dict(side=1, entry_px=100.0, stop_px=90.0)
+    assert protection(long, 105.0)["protected"] and not protection(long, 85.0)["by_exit"]
+
+
+def test_unknown_command_handler_registered(monkeypatch):
+    import os
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    import main
+    b = main.build()
+    from telegram.ext import MessageHandler
+    hs = b.app.handlers[0]
+    assert isinstance(hs[-1], MessageHandler)

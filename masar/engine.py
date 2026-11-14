@@ -46,6 +46,40 @@ class Engine:
                 continue
             self.feat[a] = features(d, STRATEGY.entry_n, STRATEGY.exit_n, STRATEGY.atr_n)
         self.btc_reg = btc_regime(self.market.daily("BTC", STRATEGY.history_days), STRATEGY.btc_entry_n, STRATEGY.btc_exit_n)
+        try:
+            self.backfill_context()
+        except Exception:
+            log.exception("backfill_context")
+
+    def backfill_context(self):
+        """Positions opened before the journal existed: rebuild the entry context from the signal day,
+        i.e. the last confirmed day before entry on which the regime turned to the position's side."""
+        for acct in self.brokers:
+            for p in self.store.positions(acct):
+                if p.get("ctx") or p["asset"] not in self.feat:
+                    continue
+                f = self.feat[p["asset"]]
+                entry_day = int(p["entry_ts"] // DAY_MS)
+                sig = None
+                for d in range(entry_day - 1, entry_day - 8, -1):
+                    if d in f.index and (d - 1) in f.index and int(f.loc[d, "reg"]) == p["side"] \
+                            and int(f.loc[d - 1, "reg"]) != p["side"]:
+                        sig = d
+                        break
+                if sig is None:
+                    continue
+                fs = f.loc[:sig]
+                others = [o for o in self.store.positions(acct) if o["entry_ts"] < p["entry_ts"]
+                          or (o["entry_ts"] == p["entry_ts"] and (o.get("trade_no") or 0) < (p.get("trade_no") or 0))]
+                curve = [r for r in self.store.equity_curve(acct) if r["day"] <= entry_day and r["equity"] >= 1]
+                eq = curve[-1]["equity"] if curve else (self.store.get("paper_start", 10000.0) if acct == "paper" else 0.0)
+                ctx = entry_context(fs, p["side"], self.btc_reg.loc[:sig], others, eq, p["qty"] * p["entry_px"])
+                ctx["backfilled"] = True
+                p["ctx"] = dumps(ctx)
+                close = float(fs["c"].iloc[-1])
+                p["signal_close"] = close
+                p["entry_slip"] = p["side"] * (p["entry_px"] - close) / close * 100
+                self.store.save_position(p)
 
     def prices(self):
         data = self.market.ex.public_get_market_tickers({"instType": "SPOT"})["data"]

@@ -93,6 +93,22 @@ def r_of(pos, px):
     return pos["side"] * (px - pos["entry_px"]) / dist if dist else 0.0
 
 
+# ---------- protection ----------
+def protection(pos, exit_level):
+    """Which level would end the trade first, and the result there.
+    Stop = order on the exchange (any moment). Exit level = checked on the daily close only."""
+    side, stop, entry = pos["side"], pos["stop_px"], pos["entry_px"]
+    if exit_level is None:
+        eff, by_exit = stop, False
+    elif side == 1:
+        eff, by_exit = (exit_level, True) if exit_level > stop else (stop, False)
+    else:
+        eff, by_exit = (exit_level, True) if exit_level < stop else (stop, False)
+    locked = r_of(pos, eff)
+    gap = None if exit_level is None else side * (entry - exit_level)    # >0: exit level still beyond entry
+    return dict(level=eff, by_exit=by_exit, locked_r=locked, protected=locked > 0, exit_level=exit_level, gap=gap)
+
+
 # ---------- lesson ----------
 def classify(r, mfe_r, reason, exit_slip, entry_slip):
     if reason in ("no_stop",) or abs(exit_slip or 0) > 0.5 or abs(entry_slip or 0) > 0.5:

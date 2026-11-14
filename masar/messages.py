@@ -1,6 +1,6 @@
 """Arabic Telegram texts (plain text with light emoji; no Markdown to avoid escaping issues)."""
 from datetime import datetime, timezone, timedelta
-from .journal import BACKTEST, TYPE_AR, loads, r_of, journal_stats, benchmark
+from .journal import BACKTEST, TYPE_AR, loads, r_of, journal_stats, benchmark, protection
 
 RIYADH = timezone(timedelta(hours=3))
 ACCT = {"paper": "🧪 المحفظة الافتراضية", "live": "💰 الحساب الحقيقي"}
@@ -48,7 +48,8 @@ def entry_card(acct, p):
              f"🟢 دخول {SIDE[side]} {a} — {lvl_word} 55 يوماً ({fmt_px(c.get('level'))})", "",
              "📍 التنفيذ",
              f"السعر: {fmt_px(p['entry_px'])} | إغلاق الإشارة: {fmt_px(p.get('signal_close'))}"
-             + (f" | انزلاق: {p['entry_slip']:.2f}%" if p.get("entry_slip") is not None else ""),
+             + (f" | انزلاق: {p['entry_slip']:.2f}%" + (" (لصالحك)" if p["entry_slip"] < 0 else "")
+                if p.get("entry_slip") is not None else ""),
              f"الوقت: {ts_txt(p['entry_ts'])}", "",
              "🛡️ المخاطرة",
              f"الوقف: {fmt_px(p['stop_px'])} ({stop_pct:+.1f}%) | الخروج عند: إغلاق {_exit_word(side)} 10 أيام ({fmt_px(c.get('exit_level'))})",
@@ -58,7 +59,7 @@ def entry_card(acct, p):
              + (f" | المفتوحة الآن: {p['open_risk']:.1f}% من 5%" if p.get("open_risk") is not None else ""),
              f"السوق: {'سبوت' if p['market'] == 'spot' else 'عقود دائمة · معزول 3x'}"]
     if c:
-        lines += ["", "🌍 الظروف",
+        lines += ["", "🌍 الظروف" + (" (محسوبة بأثر رجعي)" if c.get("backfilled") else ""),
                   f"اتجاه BTC: {REG.get(c.get('btc_reg'), '—')} منذ {c.get('btc_age', 0)} يوم",
                   f"التذبذب (ATR): {c.get('atr_pct', 0):.1f}% يومياً — أعلى من {c.get('atr_rank', 0):.0f}% من أيام السنة",
                   f"قوة الاختراق: الإغلاق بعد المستوى بـ {c.get('strength_pct', 0):.1f}%",
@@ -116,6 +117,36 @@ def event_text(ev):
     return str(data)
 
 
+# ---------- protection line ----------
+def protection_lines(pos, exit_level, short=False):
+    pr = protection(pos, exit_level)
+    side, entry = pos["side"], pos["entry_px"]
+    toward = "ينزل تحت" if side == -1 else "يصعد فوق"
+    if pr["protected"]:
+        head = f"🛡️ الحماية: {pr['locked_r']:+.2f}R محمية تقريباً"
+        if short:
+            return [head]
+        return [head, f"مستوى الخروج {fmt_px(pr['level'])} أقرب من الوقف — إغلاق يومي بعده يُنهي الصفقة عند حوالي "
+                      f"{pr['locked_r']:+.2f}R (يُفحص على الإغلاق اليومي فقط)"]
+    if pr["by_exit"]:
+        head = f"🛡️ الحماية: الخسارة محدودة بحوالي {pr['locked_r']:+.2f}R"
+        detail = [f"مستوى الخروج {fmt_px(pr['level'])} أقرب من الوقف، ويبدأ حماية الربح عندما {toward} {fmt_px(entry)}"]
+    else:
+        head = "🛡️ الحماية: الربح غير محمي بعد"
+        detail = [f"أسوأ نتيجة الآن: {pr['locked_r']:+.2f}R (الوقف {fmt_px(pos['stop_px'])})"]
+        if pr["exit_level"] is not None:
+            detail.append(f"يبدأ حماية الربح عندما {toward.replace('ينزل', 'ينزل مستوى الخروج').replace('يصعد', 'يصعد مستوى الخروج')} "
+                          f"{fmt_px(entry)} (الآن {fmt_px(pr['exit_level'])}، بفارق {fmt_px(abs(pr['gap']))})")
+    return [head] if short else [head] + detail
+
+
+def _exit_level_now(engine, p):
+    if p["asset"] not in engine.feat:
+        return None
+    lv = engine.levels(p["asset"])
+    return lv["ll10"] if p["side"] == 1 else lv["hh10"]
+
+
 # ---------- /trade ----------
 def trade_card(engine, no, acct_pref=None, prices=None):
     accts = [acct_pref] if acct_pref else list(engine.brokers)
@@ -127,12 +158,12 @@ def trade_card(engine, no, acct_pref=None, prices=None):
             extra = ["", "⏳ الصفقة مفتوحة"]
             if px:
                 extra.append(f"السعر الآن: {fmt_px(px)} | النتيجة الآن: {r_of(p, px):+.2f}R")
-            if p["asset"] in engine.feat:
-                lv = engine.levels(p["asset"])
-                ex = lv["ll10"] if p["side"] == 1 else lv["hh10"]
+            ex = _exit_level_now(engine, p)
+            if ex is not None:
                 extra.append(f"مستوى الخروج الآن: إغلاق {'تحت' if p['side'] == 1 else 'فوق'} {fmt_px(ex)}")
             if p.get("best_px") is not None:
                 extra.append(f"أفضل نقطة حتى الآن: {r_of(p, p['best_px']):+.2f}R | أسوأ نقطة: {r_of(p, p['worst_px']):+.2f}R")
+            extra += [""] + protection_lines(p, ex)
             return card + "\n" + "\n".join(extra)
         t = engine.store.trade_by_no(acct, no)
         if t:
@@ -241,6 +272,7 @@ def positions_text(engine, prices):
             no = f"#{p['trade_no']} " if p.get("trade_no") else ""
             lines.append(f"• {no}{SIDE[p['side']]} {p['asset']} من {fmt_px(p['entry_px'])} | الوقف {fmt_px(p['stop_px'])}"
                          f"{exit_lvl} | منذ {ts_txt(p['entry_ts'])}")
+            lines += ["   " + x for x in protection_lines(p, _exit_level_now(engine, p))]
     lines.append("\nللتفاصيل الكاملة: /trade <رقم>")
     return "\n".join(lines)
 
@@ -281,8 +313,9 @@ def watch_text(engine, prices):
         tag = "🧪" if o["acct"] == "paper" else "💰"
         no = f"#{p['trade_no']} " if p.get("trade_no") else ""
         lines.append(f"• {tag} {no}{SIDE[p['side']]} {p['asset']} ({o['r']:+.2f}R): الخروج عند إغلاق "
-                     f"{'تحت' if p['side'] == 1 else 'فوق'} {fmt_px(o['exit'])} ({-o['exit_dist']:+.1f}%) | "
-                     f"الوقف {fmt_px(p['stop_px'])} ({-o['stop_dist']:+.1f}%)")
+                     f"{'تحت' if p['side'] == 1 else 'فوق'} {fmt_px(o['exit'])} ({(o['exit'] / o['px'] - 1) * 100:+.1f}%) | "
+                     f"الوقف {fmt_px(p['stop_px'])} ({(p['stop_px'] / o['px'] - 1) * 100:+.1f}%)")
+        lines += ["   " + x for x in protection_lines(p, o["exit"], short=True)]
     return "\n".join(lines)
 
 

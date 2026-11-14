@@ -6,7 +6,7 @@ from datetime import time as dtime, timezone, datetime, timedelta
 import csv
 import io
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from . import messages as M
 
 log = logging.getLogger(__name__)
@@ -30,6 +30,7 @@ class MasarBot:
                          ("export", self.export)]:
             self.app.add_handler(CommandHandler(name, self._guard(fn)))
         self.app.add_handler(CallbackQueryHandler(self._guard(self.on_button)))
+        self.app.add_handler(MessageHandler(filters.COMMAND, self._guard(self.unknown)))   # after all commands
         jq = self.app.job_queue
         jq.run_daily(self.job_daily, time=dtime(0, 0, 30, tzinfo=timezone.utc), name="daily")
         jq.run_repeating(self.job_hourly, interval=3600, first=self._next_hour_offset(), name="hourly")
@@ -165,6 +166,9 @@ class MasarBot:
             await self.send(f"🚨 فشل الفحص الساعي: {e}")
 
     # ---------- commands ----------
+    async def unknown(self, update, ctx):
+        await update.message.reply_text("أمر غير معروف — اكتب /help لعرض الأوامر.")
+
     async def help(self, update, ctx):
         await update.message.reply_text(HELP)
 
