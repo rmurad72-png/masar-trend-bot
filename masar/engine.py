@@ -401,6 +401,39 @@ class Engine:
                                   dist=o["exit_dist"], level=o["exit"], r=o["r"]))
         return items
 
+    def live_readiness(self, prices, near_pct=10.0, min_equity=100.0):
+        """Is a real buying opportunity approaching? Buys need BTC's regime to turn up (filter).
+        Returns a dict when the state escalates (far -> near -> open), else None. Live account only."""
+        if "live" not in self.brokers:
+            return None
+        self.ensure_features()
+        b = self.levels("BTC")
+        px = prices.get("BTC")
+        if not px:
+            return None
+        reg = int(self.btc_reg.iloc[-1])
+        dist = (b["hh55"] / px - 1) * 100
+        state = "open" if reg == 1 else ("near" if dist <= near_pct else "far")
+        prev = self.store.get("live_ready_state", "far")
+        self.store.set("live_ready_state", state)
+        rank = {"far": 0, "near": 1, "open": 2}
+        if rank[state] <= rank[prev]:
+            return None
+        try:
+            eq = self.brokers["live"].equity(prices)
+        except Exception:
+            eq = 0.0
+        near_longs = []
+        for a in self.feat:
+            p = prices.get(a)
+            if p and a != "BTC":
+                lv = self.levels(a)
+                if lv["reg"] != 1:
+                    near_longs.append((a, (lv["hh55"] / p - 1) * 100))
+        near_longs.sort(key=lambda x: x[1])
+        return dict(state=state, dist=dist, level=b["hh55"], equity=eq, min_equity=min_equity,
+                    near_longs=near_longs[:3])
+
     def btc_closes(self):
         self.ensure_features()
         return self.feat["BTC"]["c"]

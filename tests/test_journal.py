@@ -88,3 +88,28 @@ def test_unknown_command_handler_registered(monkeypatch):
     from telegram.ext import MessageHandler
     hs = b.app.handlers[0]
     assert isinstance(hs[-1], MessageHandler)
+
+
+def test_live_readiness_escalates_once(monkeypatch):
+    from tests.fakes import trend_frame, FakeMarket
+    from masar.store import Store
+    from masar.engine import Engine
+    from masar.config import Settings, ASSETS
+    fr = trend_frame(n=101)            # BTC breaks out on the last day -> regime up
+    st = Store("sqlite:///:memory:")
+
+    class Live:
+        account = "live"
+        def equity(self, p=None): return 17.0
+    eng = Engine(Settings(), st, FakeMarket({"BTC": fr}, {}), {"live": Live()})
+    eng.load_features()
+    prices = {a: float(fr["c"].iloc[-1]) for a in ASSETS}
+    r = eng.live_readiness(prices)
+    assert r["state"] == "open" and r["equity"] == 17.0
+    txt = M.readiness_text(r)
+    assert "الشراء مفتوح" in txt and "أقل من 100$" in txt
+    assert eng.live_readiness(prices) is None          # no repeat while the state is unchanged
+
+
+def test_dd_format_and_empty_bench():
+    assert M._dd(0.01) == "0.0%" and M._dd(14.9) == "−14.9%"

@@ -131,6 +131,12 @@ class MasarBot:
             return
         await self._send_events(events)
         prices = await self._run(self.engine.prices)
+        try:
+            ready = await self._run(self.engine.live_readiness, prices)
+            if ready:
+                await self.send(M.readiness_text(ready))
+        except Exception:
+            log.exception("live_readiness")
         n_in = sum(1 for e in events if e[0] == "entry")
         n_out = sum(1 for e in events if e[0] == "exit")
         await self.send(f"🗓️ التقرير اليومي\nدخول: {n_in} | خروج: {n_out}\n\n" + M.status_text(self.engine, prices))

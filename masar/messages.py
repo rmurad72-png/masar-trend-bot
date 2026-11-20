@@ -162,7 +162,11 @@ def trade_card(engine, no, acct_pref=None, prices=None):
             if ex is not None:
                 extra.append(f"مستوى الخروج الآن: إغلاق {'تحت' if p['side'] == 1 else 'فوق'} {fmt_px(ex)}")
             if p.get("best_px") is not None:
-                extra.append(f"أفضل نقطة حتى الآن: {r_of(p, p['best_px']):+.2f}R | أسوأ نقطة: {r_of(p, p['worst_px']):+.2f}R")
+                best_r = r_of(p, p["best_px"])
+                worst_r = r_of(p, p["worst_px"])
+                if px:      # recorded points come from closed 1H candles; the live price may already be beyond them
+                    best_r, worst_r = max(best_r, r_of(p, px)), min(worst_r, r_of(p, px))
+                extra.append(f"أفضل نقطة حتى الآن: {best_r:+.2f}R | أسوأ نقطة: {worst_r:+.2f}R")
             extra += [""] + protection_lines(p, ex)
             return card + "\n" + "\n".join(extra)
         t = engine.store.trade_by_no(acct, no)
@@ -338,8 +342,34 @@ def evening_text(items):
     return "\n".join(lines)
 
 
+# ---------- live readiness ----------
+def readiness_text(r):
+    if r["state"] == "open":
+        head = "💰 تنبيه للحساب الحقيقي: اتجاه BTC تحوّل للصعود — الشراء مفتوح الآن"
+    else:
+        head = (f"💰 تنبيه للحساب الحقيقي: BTC يقترب من فتح الشراء — يحتاج {r['dist']:+.1f}% "
+                f"(إغلاق يومي فوق {fmt_px(r['level'])})")
+    lines = [head]
+    if r.get("near_longs"):
+        lines.append("الأقرب للدخول: " + "، ".join(f"{a} ({d:+.1f}%)" for a, d in r["near_longs"]))
+    if r["equity"] < r["min_equity"]:
+        lines.append(f"رصيد الحساب الحقيقي {r['equity']:.2f}$ — أقل من {r['min_equity']:.0f}$ اللازمة لتنفيذ الصفقات فوق "
+                     f"الحد الأدنى للمنصة. إن أردت المشاركة: أودع في حساب التداول (Trading) داخل الحساب الفرعي.")
+    else:
+        lines.append(f"رصيد الحساب الحقيقي {r['equity']:.2f}$ — جاهز.")
+    lines.append("المحفظة الافتراضية تنفّذ الإشارات في كل الأحوال.")
+    return "\n".join(lines)
+
+
 # ---------- reports ----------
+def _dd(v):
+    return "0.0%" if v < 0.05 else f"−{v:.1f}%"
+
+
 def bench_lines(engine, acct):
+    curve = engine.store.equity_curve(acct)
+    if curve and curve[-1]["equity"] < 1:
+        return ["📈 مقابل البيتكوين: ⚪ بلا رصيد — تبدأ المقارنة عند إيداع رصيد"]
     start = engine.bench_start(acct)
     if start is None:
         return []
@@ -354,7 +384,7 @@ def bench_lines(engine, acct):
         x = bm.get(w)
         lines.append(f"• {lab}: " + ("—" if not x else f"مسار {x['bot']:+.1f}% | BTC {x['btc']:+.1f}%"))
     x = bm[None]
-    lines.append(f"• أقصى تراجع: مسار −{x['bot_dd']:.1f}% | BTC −{x['btc_dd']:.1f}%")
+    lines.append(f"• أقصى تراجع: مسار {_dd(x['bot_dd'])} | BTC {_dd(x['btc_dd'])}")
     diff = x["bot"] - x["btc"]
     lines.append(f"• الفارق: {diff:+.1f} نقطة {'لصالح مسار' if diff >= 0 else 'لصالح البيتكوين'} ({x['days']} يوم)")
     return lines
